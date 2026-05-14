@@ -1,10 +1,21 @@
 name: Build Game
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  # Manual trigger only
+  workflow_dispatch:
+    inputs:
+      num_disks:
+        description: 'Default number of disks for testing'
+        required: false
+        default: '4'
+        type: choice
+        options:
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
 
 jobs:
   build:
@@ -20,22 +31,32 @@ jobs:
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
 
-    - name: Install system dependencies (for egui)
+    - name: Install system dependencies (for egui + audio)
       run: |
         sudo apt-get update
-        sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-                                libxkbcommon-dev libssl-dev libgtk-3-dev \
-                                libasound2-dev libpulse-dev
+        sudo apt-get install -y \
+          libxcb-render0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libxkbcommon-dev \
+          libssl-dev \
+          libgtk-3-dev \
+          libasound2-dev \
+          libpulse-dev
 
-    - name: Build
+    - name: Build Release
       run: cargo build --release
 
     - name: Run tests
-      run: cargo test
+      run: cargo test --verbose
 
-    - name: Upload binary (optional)
+    - name: Upload Linux Binary
       uses: actions/upload-artifact@v4
-      if: github.ref == 'refs/heads/main'
       with:
         name: tower-of-hanoi-linux
         path: target/release/tower_of_hanoi_egui
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Success Message
+      run: echo "✅ Build completed successfully!"
