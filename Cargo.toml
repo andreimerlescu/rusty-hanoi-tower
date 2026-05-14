@@ -1,0 +1,8 @@
+[package]
+name = "rusty-hanoi-tower"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.31", features = ["default"] }
+egui = "0.31"
