@@ -84,16 +84,16 @@ impl HanoiApp {
         self.show_hint = false;
     }
 
+    /// Play a sound effect. Gracefully does nothing if audio is unavailable.
     fn play_sound(&self, name: &str) {
         if let Some(sink) = &self.sink {
             let path = format!("assets/{}.wav", name);
             if Path::new(&path).exists() {
                 if let Ok(file) = File::open(&path) {
                     if let Ok(source) = rodio::Decoder::new(BufReader::new(file)) {
-                        let _ = sink.clone().map(|s| {
-                            s.append(source);
-                            s.play();
-                        });
+                        let sink_clone = sink.clone();
+                        sink_clone.append(source);
+                        sink_clone.play();
                     }
                 }
             }
@@ -103,10 +103,12 @@ impl HanoiApp {
     fn is_valid_move(&self, from: Peg, to: Peg) -> bool {
         let f = from as usize;
         let t = to as usize;
+
         let disk = match self.pegs[f].back() {
             Some(&d) => d,
             None => return false,
         };
+
         match self.pegs[t].back() {
             Some(&top) => disk < top,
             None => true,
@@ -129,6 +131,7 @@ impl HanoiApp {
         self.history.push(Move { from, to, disk });
         self.move_count += 1;
 
+        // Start smooth animation
         self.animated_disk = Some(AnimatedDisk {
             disk,
             from_peg: from,
@@ -183,6 +186,7 @@ impl eframe::App for HanoiApp {
             ui.heading("🗼 Tower of Hanoi");
             ui.separator();
 
+            // Controls
             ui.horizontal(|ui| {
                 ui.label("Disks:");
                 if ui.button("−").clicked() && self.num_disks > 3 {
@@ -232,13 +236,14 @@ impl eframe::App for HanoiApp {
                         .rect;
                     let painter = ui.painter_at(rect);
 
-                    // Base and Pole
+                    // Base
                     let base_rect = egui::Rect::from_min_max(
                         rect.min + egui::vec2(-peg_w * 0.45, 400.0),
                         rect.min + egui::vec2(peg_w * 0.45, 410.0),
                     );
                     painter.rect_filled(base_rect, 2.0, egui::Color32::DARK_GRAY);
 
+                    // Pole
                     painter.line_segment(
                         [
                             rect.center_top() + egui::vec2(0.0, 40.0),
@@ -257,7 +262,6 @@ impl eframe::App for HanoiApp {
                             egui::vec2(width, 32.0),
                         );
 
-                        // Simple color based on size
                         let hue = (size as f32 * 40.0) % 360.0;
                         let color = egui::Color32::from_rgb(
                             (hue.sin() * 127.0 + 128.0) as u8,
@@ -266,22 +270,16 @@ impl eframe::App for HanoiApp {
                         );
 
                         painter.rect_filled(disk_rect, 6.0, color);
-                        painter.rect_stroke(
-                            disk_rect,
-                            6.0,
-                            egui::Stroke::new(3.0, egui::Color32::BLACK),
-                        );
+                        painter.rect_stroke(disk_rect, 6.0, egui::Stroke::new(3.0, egui::Color32::BLACK));
                     }
 
-                    // Animated disk
+                    // Animated moving disk
                     if let Some(anim) = &self.animated_disk {
-                        let from_i = anim.from_peg as usize;
-                        let to_i = anim.to_peg as usize;
-                        if from_i == i || to_i == i {
-                            let p = anim.progress;
-                            let start_x = (from_i as f32 - i as f32) * peg_w;
+                        if (anim.from_peg as usize == i) || (anim.to_peg as usize == i) {
+                            let p = anim.progress.clamp(0.0, 1.0);
+                            let start_x = (anim.from_peg as usize as f32 - i as f32) * peg_w;
                             let x = start_x * (1.0 - p);
-                            let y = 140.0 + (p * std::f32::consts::PI).sin() * 90.0;
+                            let y = 140.0 + (p * std::f32::consts::PI).sin() * 90.0; // parabolic arc
 
                             let width = (anim.disk as f32 / self.num_disks as f32) * max_disk_w;
                             let disk_rect = egui::Rect::from_center_size(
@@ -291,14 +289,11 @@ impl eframe::App for HanoiApp {
 
                             let color = egui::Color32::from_rgb(255, 220, 100);
                             painter.rect_filled(disk_rect, 8.0, color);
-                            painter.rect_stroke(
-                                disk_rect,
-                                8.0,
-                                egui::Stroke::new(4.0, egui::Color32::YELLOW),
-                            );
+                            painter.rect_stroke(disk_rect, 8.0, egui::Stroke::new(4.0, egui::Color32::YELLOW));
                         }
                     }
 
+                    // Peg label
                     painter.text(
                         rect.min + egui::vec2(peg_w / 2.0, 425.0),
                         egui::Align2::CENTER_TOP,
@@ -312,16 +307,8 @@ impl eframe::App for HanoiApp {
             // Hint
             if self.show_hint && !self.solution.is_empty() {
                 if let Some((from, to)) = self.solution.get(self.move_count) {
-                    let from_str = match from {
-                        Peg::A => "A",
-                        Peg::B => "B",
-                        Peg::C => "C",
-                    };
-                    let to_str = match to {
-                        Peg::A => "A",
-                        Peg::B => "B",
-                        Peg::C => "C",
-                    };
+                    let from_str = match from { Peg::A => "A", Peg::B => "B", Peg::C => "C" };
+                    let to_str = match to { Peg::A => "A", Peg::B => "B", Peg::C => "C" };
                     ui.colored_label(
                         egui::Color32::LIGHT_BLUE,
                         format!("💡 Hint: Move from {} → {}", from_str, to_str),
@@ -334,7 +321,7 @@ impl eframe::App for HanoiApp {
             }
         });
 
-        // Animation
+        // Update animation
         if let Some(anim) = &mut self.animated_disk {
             anim.progress += 0.085;
             if anim.progress >= 1.0 {
@@ -343,7 +330,7 @@ impl eframe::App for HanoiApp {
             ctx.request_repaint();
         }
 
-        // Auto solve
+        // Auto-solve
         if self.auto_solving && self.animated_disk.is_none() {
             if self.auto_step < self.solution.len() {
                 let (from, to) = self.solution[self.auto_step];
