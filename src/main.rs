@@ -379,6 +379,7 @@ impl eframe::App for HanoiApp {
                             disk_rect,
                             6.0,
                             egui::Stroke::new(2.0, egui::Color32::BLACK),
+                            egui::StrokeKind::Outside,
                         );
                     }
 
@@ -405,6 +406,7 @@ impl eframe::App for HanoiApp {
                                 disk_rect,
                                 8.0,
                                 egui::Stroke::new(3.0, egui::Color32::YELLOW),
+                                egui::StrokeKind::Outside,
                             );
                         }
                     }
