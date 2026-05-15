@@ -6,12 +6,8 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Peg {
-    A,
-    B,
-    C,
-}
+// A peg is just its index into self.pegs
+type Peg = usize;
 
 #[derive(Clone)]
 struct Move {
@@ -27,9 +23,43 @@ struct AnimatedDisk {
     progress: f32,
 }
 
+// ---------------------------------------------------------------------------
+// Level
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Level {
+    number: usize,    // 1–330
+    num_pegs: usize,  // 3–33
+    num_disks: usize, // grows with tier and variation
+    variation: usize, // 1–10
+}
+
+impl Level {
+    fn from_number(n: usize) -> Self {
+        let n = n.clamp(1, 330);
+        let variation = ((n - 1) % 10) + 1; // 1–10, cycles every 10 levels
+        let tier = (n - 1) / 10;            // 0–32, increments every 10 levels
+        let num_pegs = (3 + tier).min(33);
+        let num_disks = 3 + tier + variation / 3; // 3 at tier 0 var 1, grows steadily
+        Self { number: n, num_pegs, num_disks, variation }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "Level {} — {} pegs, {} disks (variation {}/10)",
+            self.number, self.num_pegs, self.num_disks, self.variation
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
 struct HanoiApp {
-    num_disks: usize,
-    pegs: [VecDeque<usize>; 3],
+    level: Level,
+    pegs: Vec<VecDeque<usize>>,
     history: Vec<Move>,
     selected: Option<Peg>,
     animated_disk: Option<AnimatedDisk>,
@@ -50,8 +80,8 @@ impl Default for HanoiApp {
         let sink = stream_handle.and_then(|h| Sink::try_new(&h).ok());
 
         let mut app = Self {
-            num_disks: 4,
-            pegs: Default::default(),
+            level: Level::from_number(1),
+            pegs: Vec::new(),
             history: Vec::new(),
             selected: None,
             animated_disk: None,
@@ -60,7 +90,7 @@ impl Default for HanoiApp {
             auto_step: 0,
             solution: Vec::new(),
             show_hint: false,
-            _stream: _stream,
+            _stream,
             sink: sink.map(Arc::new),
         };
         app.reset();
@@ -70,10 +100,14 @@ impl Default for HanoiApp {
 
 impl HanoiApp {
     fn reset(&mut self) {
-        self.pegs = Default::default();
-        for i in (1..=self.num_disks).rev() {
+        let num_pegs = self.level.num_pegs;
+        let num_disks = self.level.num_disks;
+
+        self.pegs = vec![VecDeque::new(); num_pegs];
+        for i in (1..=num_disks).rev() {
             self.pegs[0].push_back(i);
         }
+
         self.history.clear();
         self.selected = None;
         self.animated_disk = None;
@@ -82,6 +116,18 @@ impl HanoiApp {
         self.auto_step = 0;
         self.solution.clear();
         self.show_hint = false;
+    }
+
+    fn go_to_level(&mut self, n: usize) {
+        self.level = Level::from_number(n);
+        self.reset();
+        self.play_sound("click");
+    }
+
+    fn is_solved(&self) -> bool {
+        self.pegs
+            .last()
+            .map_or(false, |p| p.len() == self.level.num_disks)
     }
 
     /// Play a sound effect. Gracefully does nothing if audio is unavailable.
@@ -101,15 +147,11 @@ impl HanoiApp {
     }
 
     fn is_valid_move(&self, from: Peg, to: Peg) -> bool {
-        let f = from as usize;
-        let t = to as usize;
-
-        let disk = match self.pegs[f].back() {
+        let disk = match self.pegs[from].back() {
             Some(&d) => d,
             None => return false,
         };
-
-        match self.pegs[t].back() {
+        match self.pegs[to].back() {
             Some(&top) => disk < top,
             None => true,
         }
@@ -124,14 +166,11 @@ impl HanoiApp {
             return false;
         }
 
-        let f = from as usize;
-        let disk = self.pegs[f].pop_back().unwrap();
-        self.pegs[to as usize].push_back(disk);
-
+        let disk = self.pegs[from].pop_back().unwrap();
+        self.pegs[to].push_back(disk);
         self.history.push(Move { from, to, disk });
         self.move_count += 1;
 
-        // Start smooth animation
         self.animated_disk = Some(AnimatedDisk {
             disk,
             from_peg: from,
@@ -141,34 +180,39 @@ impl HanoiApp {
 
         self.play_sound("move");
 
-        if self.pegs[2].len() == self.num_disks {
+        if self.is_solved() {
             self.play_sound("win");
         }
+
         true
     }
 
     fn undo(&mut self) {
         if let Some(last) = self.history.pop() {
-            let disk = self.pegs[last.to as usize].pop_back().unwrap();
-            self.pegs[last.from as usize].push_back(disk);
+            let disk = self.pegs[last.to].pop_back().unwrap();
+            self.pegs[last.from].push_back(disk);
             self.move_count = self.move_count.saturating_sub(1);
             self.animated_disk = None;
             self.play_sound("move");
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Solvers
+    // -----------------------------------------------------------------------
+
     fn generate_solution(&mut self) {
         self.solution.clear();
-        fn hanoi(n: usize, src: Peg, dst: Peg, aux: Peg, moves: &mut Vec<(Peg, Peg)>) {
-            if n == 1 {
-                moves.push((src, dst));
-                return;
-            }
-            hanoi(n - 1, src, aux, dst, moves);
-            moves.push((src, dst));
-            hanoi(n - 1, aux, dst, src, moves);
+        let num_pegs = self.level.num_pegs;
+        let num_disks = self.level.num_disks;
+        let dst = num_pegs - 1;
+
+        if num_pegs == 3 {
+            hanoi_3peg(num_disks, 0, dst, 1, &mut self.solution);
+        } else {
+            let aux: Vec<Peg> = (1..dst).collect();
+            frame_stewart(num_disks, 0, dst, aux, &mut self.solution);
         }
-        hanoi(self.num_disks, Peg::A, Peg::C, Peg::B, &mut self.solution);
     }
 
     fn hint(&mut self) {
@@ -180,24 +224,84 @@ impl HanoiApp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Solvers (free functions)
+// ---------------------------------------------------------------------------
+
+fn hanoi_3peg(n: usize, src: Peg, dst: Peg, aux: Peg, moves: &mut Vec<(Peg, Peg)>) {
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        moves.push((src, dst));
+        return;
+    }
+    hanoi_3peg(n - 1, src, aux, dst, moves);
+    moves.push((src, dst));
+    hanoi_3peg(n - 1, aux, dst, src, moves);
+}
+
+fn frame_stewart(
+    n: usize,
+    src: Peg,
+    dst: Peg,
+    aux: Vec<Peg>,
+    moves: &mut Vec<(Peg, Peg)>,
+) {
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        moves.push((src, dst));
+        return;
+    }
+    if aux.is_empty() {
+        return;
+    }
+    if aux.len() == 1 {
+        hanoi_3peg(n, src, dst, aux[0], moves);
+        return;
+    }
+
+    // optimal k: move k disks aside using all pegs, then n-k using n-1 pegs, then k back
+    let k = (n as f64 - (2.0 * n as f64).sqrt()).round().max(1.0) as usize;
+
+    let spare = aux[0];
+    let rest: Vec<Peg> = aux[1..].to_vec();
+
+    let aux1: Vec<Peg> = [&[dst], rest.as_slice()].concat();
+    frame_stewart(k, src, spare, aux1, moves);
+
+    let aux2: Vec<Peg> = rest.clone();
+    frame_stewart(n - k, src, dst, aux2, moves);
+
+    let aux3: Vec<Peg> = [&[src], rest.as_slice()].concat();
+    frame_stewart(k, spare, dst, aux3, moves);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
 impl eframe::App for HanoiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("🗼 Tower of Hanoi");
+            ui.label(self.level.label());
             ui.separator();
 
             // Controls
             ui.horizontal(|ui| {
-                ui.label("Disks:");
-                if ui.button("−").clicked() && self.num_disks > 3 {
-                    self.num_disks -= 1;
-                    self.reset();
+                if ui.button("⬅ Prev Level").clicked() && self.level.number > 1 {
+                    let n = self.level.number - 1;
+                    self.go_to_level(n);
                 }
-                ui.label(self.num_disks.to_string());
-                if ui.button("+").clicked() && self.num_disks < 8 {
-                    self.num_disks += 1;
-                    self.reset();
+                if ui.button("Next Level ➡").clicked() && self.level.number < 330 {
+                    let n = self.level.number + 1;
+                    self.go_to_level(n);
                 }
+
+                ui.separator();
 
                 if ui.button("Reset").clicked() {
                     self.reset();
@@ -223,13 +327,14 @@ impl eframe::App for HanoiApp {
 
             ui.separator();
 
-            let peg_names = ["A", "B", "C"];
+            let num_pegs = self.level.num_pegs;
+            let num_disks = self.level.num_disks;
             let avail_w = ui.available_width();
-            let peg_w = avail_w / 4.0;
+            let peg_w = avail_w / (num_pegs + 1) as f32;
             let max_disk_w = peg_w * 0.85;
 
             ui.horizontal(|ui| {
-                for (i, &peg) in [Peg::A, Peg::B, Peg::C].iter().enumerate() {
+                for i in 0..num_pegs {
                     let rect = ui
                         .allocate_exact_size(egui::vec2(peg_w, 440.0), egui::Sense::hover())
                         .1
@@ -249,12 +354,12 @@ impl eframe::App for HanoiApp {
                             rect.center_top() + egui::vec2(0.0, 40.0),
                             rect.center_top() + egui::vec2(0.0, 400.0),
                         ],
-                        egui::Stroke::new(10.0, egui::Color32::GRAY),
+                        egui::Stroke::new(6.0, egui::Color32::GRAY),
                     );
 
                     // Static disks
                     for (level, &size) in self.pegs[i].iter().enumerate() {
-                        let width = (size as f32 / self.num_disks as f32) * max_disk_w;
+                        let width = (size as f32 / num_disks as f32) * max_disk_w;
                         let y = 380.0 - (level as f32 * 36.0);
 
                         let disk_rect = egui::Rect::from_center_size(
@@ -270,35 +375,52 @@ impl eframe::App for HanoiApp {
                         );
 
                         painter.rect_filled(disk_rect, 6.0, color);
-                        painter.rect_stroke(disk_rect, 6.0, egui::Stroke::new(3.0, egui::Color32::BLACK));
+                        painter.rect_stroke(
+                            disk_rect,
+                            6.0,
+                            egui::Stroke::new(2.0, egui::Color32::BLACK),
+                        );
                     }
 
-                    // Animated moving disk
+                    // Animated disk
                     if let Some(anim) = &self.animated_disk {
-                        if (anim.from_peg as usize == i) || (anim.to_peg as usize == i) {
+                        if anim.from_peg == i || anim.to_peg == i {
                             let p = anim.progress.clamp(0.0, 1.0);
-                            let start_x = (anim.from_peg as usize as f32 - i as f32) * peg_w;
-                            let x = start_x * (1.0 - p);
-                            let y = 140.0 + (p * std::f32::consts::PI).sin() * 90.0; // parabolic arc
+                            let from_x = anim.from_peg as f32 * peg_w;
+                            let to_x = anim.to_peg as f32 * peg_w;
+                            let cur_x = from_x + (to_x - from_x) * p;
+                            // x relative to this peg's rect
+                            let x = cur_x - i as f32 * peg_w;
+                            let arc_y = (p * std::f32::consts::PI).sin() * 90.0;
+                            let y = 220.0 - 140.0 - arc_y;
 
-                            let width = (anim.disk as f32 / self.num_disks as f32) * max_disk_w;
+                            let width = (anim.disk as f32 / num_disks as f32) * max_disk_w;
                             let disk_rect = egui::Rect::from_center_size(
-                                rect.min + egui::vec2(x, 220.0 - y),
+                                rect.min + egui::vec2(x, y),
                                 egui::vec2(width, 32.0),
                             );
 
-                            let color = egui::Color32::from_rgb(255, 220, 100);
-                            painter.rect_filled(disk_rect, 8.0, color);
-                            painter.rect_stroke(disk_rect, 8.0, egui::Stroke::new(4.0, egui::Color32::YELLOW));
+                            painter.rect_filled(disk_rect, 8.0, egui::Color32::from_rgb(255, 220, 100));
+                            painter.rect_stroke(
+                                disk_rect,
+                                8.0,
+                                egui::Stroke::new(3.0, egui::Color32::YELLOW),
+                            );
                         }
                     }
 
-                    // Peg label
+                    // Peg label — letter for A–Z, then "P27" style beyond that
+                    let label = if i < 26 {
+                        ((b'A' + i as u8) as char).to_string()
+                    } else {
+                        format!("P{}", i + 1)
+                    };
+
                     painter.text(
                         rect.min + egui::vec2(peg_w / 2.0, 425.0),
                         egui::Align2::CENTER_TOP,
-                        peg_names[i],
-                        egui::FontId::proportional(26.0),
+                        label,
+                        egui::FontId::proportional(18.0),
                         egui::Color32::WHITE,
                     );
                 }
@@ -306,22 +428,24 @@ impl eframe::App for HanoiApp {
 
             // Hint
             if self.show_hint && !self.solution.is_empty() {
-                if let Some((from, to)) = self.solution.get(self.move_count) {
-                    let from_str = match from { Peg::A => "A", Peg::B => "B", Peg::C => "C" };
-                    let to_str = match to { Peg::A => "A", Peg::B => "B", Peg::C => "C" };
+                if let Some(&(from, to)) = self.solution.get(self.move_count) {
+                    let peg_label = |i: usize| -> String {
+                        if i < 26 { ((b'A' + i as u8) as char).to_string() }
+                        else { format!("P{}", i + 1) }
+                    };
                     ui.colored_label(
                         egui::Color32::LIGHT_BLUE,
-                        format!("💡 Hint: Move from {} → {}", from_str, to_str),
+                        format!("💡 Hint: Move from {} → {}", peg_label(from), peg_label(to)),
                     );
                 }
             }
 
-            if self.pegs[2].len() == self.num_disks {
+            if self.is_solved() {
                 ui.colored_label(egui::Color32::GOLD, "🎉 Congratulations! You solved it!");
             }
         });
 
-        // Update animation
+        // Tick animation
         if let Some(anim) = &mut self.animated_disk {
             anim.progress += 0.085;
             if anim.progress >= 1.0 {
@@ -330,7 +454,7 @@ impl eframe::App for HanoiApp {
             ctx.request_repaint();
         }
 
-        // Auto-solve
+        // Auto-solve tick
         if self.auto_solving && self.animated_disk.is_none() {
             if self.auto_step < self.solution.len() {
                 let (from, to) = self.solution[self.auto_step];
@@ -343,6 +467,10 @@ impl eframe::App for HanoiApp {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
